@@ -24,25 +24,31 @@ createApp({
       cancel: { text: '付款已取消。', cls: 'bg-apricot/10 text-apricot border border-apricot/20' },
     };
 
-    async function simulatePay(action) {
+    async function handlePayWithEcpay() {
       if (!order.value || paying.value) return;
       paying.value = true;
       try {
-        const res = await apiFetch('/api/orders/' + order.value.id + '/pay', {
-          method: 'PATCH',
-          body: JSON.stringify({ action })
-        });
-        order.value = res.data;
-        paymentResult.value = action === 'success' ? 'success' : 'failed';
+        const res = await apiFetch('/api/ecpay/checkout/' + order.value.id, { method: 'POST' });
+        const { actionUrl, params } = res.data;
+        // 動態建立 form 並直接 submit 至 ECPay（繞過 SPA 路由）
+        const form = document.createElement('form');
+        form.method = 'POST';
+        form.action = actionUrl;
+        for (const [key, value] of Object.entries(params)) {
+          const input = document.createElement('input');
+          input.type = 'hidden';
+          input.name = key;
+          input.value = value;
+          form.appendChild(input);
+        }
+        document.body.appendChild(form);
+        form.submit();
+        // form.submit() 後頁面離開，不需 reset paying
       } catch (e) {
-        Notification.show('付款處理失敗', 'error');
-      } finally {
+        Notification.show('建立付款請求失敗', 'error');
         paying.value = false;
       }
     }
-
-    function handlePaySuccess() { simulatePay('success'); }
-    function handlePayFail() { simulatePay('fail'); }
 
     onMounted(async function () {
       try {
@@ -55,6 +61,6 @@ createApp({
       }
     });
 
-    return { order, loading, paying, paymentResult, statusMap, paymentMessages, handlePaySuccess, handlePayFail };
+    return { order, loading, paying, paymentResult, statusMap, paymentMessages, handlePayWithEcpay };
   }
 }).mount('#app');

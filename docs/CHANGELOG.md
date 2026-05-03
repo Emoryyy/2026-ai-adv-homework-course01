@@ -4,6 +4,23 @@
 
 ---
 
+## [1.1.0] — 2026-05-03
+
+### 新增
+
+**ECPay 金流整合**
+- `POST /api/ecpay/checkout/:orderId` — 產生 ECPay AIO 付款參數（MerchantTradeNo、CheckMacValue），回傳 `{ actionUrl, params }` 供前端自動 submit form 至綠界
+- `POST /api/ecpay/return` — OrderResultURL 端點，ECPay 付款後透過瀏覽器 POST 導回；以 `QueryTradeInfo/V5` 主動查詢確認 TradeStatus，防止參數竄改；查詢失敗時 fallback 使用 RtnCode
+- `POST /api/ecpay/notify` — ReturnURL（S2S）端點，冪等更新訂單狀態；localhost 環境 ECPay 無法觸達，部署至公開主機後正常運作
+- `src/utils/ecpay.js` — CheckMacValue 產生與 timing-safe 驗證、`QueryTradeInfo` 查詢、台灣時區日期格式化
+- `orders` 表新增 `merchant_trade_no TEXT` 欄位（runtime migration，透過 `ALTER TABLE` 自動補欄）
+
+### 修改
+
+- `views/pages/order-detail.ejs` + `public/js/pages/order-detail.js`：付款按鈕由模擬 `simulatePay` 改為呼叫 `POST /api/ecpay/checkout` 並動態建立 form submit
+
+---
+
 ## [1.0.0] — 2026-05-03
 
 ### 新增

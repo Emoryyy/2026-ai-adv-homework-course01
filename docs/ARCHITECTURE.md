@@ -26,6 +26,7 @@
 │       ├── cartRoutes.js           購物車 CRUD（雙模式：JWT / Session）
 │       ├── orderRoutes.js          建立訂單、查詢訂單、模擬支付
 │       ├── adminOrderRoutes.js     管理員查詢所有訂單
+│       ├── ecpayRoutes.js          ECPay 金流：checkout / return / notify
 │       └── pageRoutes.js           SSR 頁面路由，res.render() EJS 模板
 │
 ├── public/
@@ -103,6 +104,7 @@ server.js
   │     ├── /api/cart      → cartRoutes（auth 或 session 在 routes 內使用）
   │     ├── /api/orders    → orderRoutes（auth 在 routes 內使用）
   │     ├── /api/admin/orders → adminOrderRoutes（auth + admin 在 routes 內使用）
+  │     ├── /api/ecpay    → ecpayRoutes（checkout 需 auth；return/notify 為 ECPay 回呼，無需 JWT）
   │     ├── /              → pageRoutes（SSR）
   │     ├── 404 handler（JSON vs HTML 依 Accept header 區分）
   │     └── errorHandler（全域錯誤捕捉）
@@ -135,6 +137,9 @@ server.js
 | PATCH | /api/orders/:id/pay | JWT | 模擬支付（success/fail） |
 | GET | /api/admin/orders | JWT + Admin | 管理員查詢所有訂單 |
 | GET | /api/admin/orders/:id | JWT + Admin | 管理員查詢訂單詳情 |
+| POST | /api/ecpay/checkout/:orderId | JWT | 產生 ECPay AIO 付款參數（CheckMacValue） |
+| POST | /api/ecpay/return | 無（ECPay 回呼） | OrderResultURL：查詢 TradeInfo 後更新訂單狀態並 redirect |
+| POST | /api/ecpay/notify | 無（ECPay 回呼） | ReturnURL S2S：冪等更新訂單狀態 |
 
 ### 頁面路由（SSR）
 
@@ -281,6 +286,7 @@ cart_items 表中：
 | recipient_address | TEXT | NOT NULL | 收件地址 |
 | total_amount | INTEGER | NOT NULL | 訂單金額 |
 | status | TEXT | NOT NULL, DEFAULT 'pending', CHECK IN ('pending','paid','failed') | 訂單狀態 |
+| merchant_trade_no | TEXT | — | ECPay MerchantTradeNo，付款後查詢用；runtime migration 補欄 |
 | created_at | TEXT | NOT NULL, DEFAULT datetime('now') | 建立時間 |
 
 ### order_items
@@ -312,13 +318,40 @@ function generateOrderNo() {
 
 ### ECPay（金流）
 
-目前**尚未整合**，僅有環境變數佔位符：
-- `ECPAY_MERCHANT_ID`
-- `ECPAY_HASH_KEY`
-- `ECPAY_HASH_IV`
-- `ECPAY_ENV`（staging/production）
+已整合 **ECPay AIO 全方位金流**（`ecpayRoutes.js` + `src/utils/ecpay.js`）。
 
-支付功能目前透過 `PATCH /api/orders/:id/pay` 模擬，`action: 'success'` 或 `action: 'fail'`。
+**環境變數**：
+- `ECPAY_MERCHANT_ID` — 特店編號
+- `ECPAY_HASH_KEY` — SHA256 CheckMacValue 用 HashKey
+- `ECPAY_HASH_IV` — SHA256 CheckMacValue 用 HashIV
+- `ECPAY_ENV` — `staging`（預設）或 `production`
+
+**付款流程**：
+
+```
+前端 POST /api/ecpay/checkout/:orderId
+  → 產生 MerchantTradeNo（訂單號去連字號 + 時間戳後4位，最長20碼）
+  → 計算 CheckMacValue（ecpayUrlEncode + SHA256）
+  → 儲存 merchant_trade_no 至 orders 表
+  → 回傳 { actionUrl, params }
+  → 前端動態建立 <form> submit 至 payment-stage.ecpay.com.tw
+
+ECPay 付款完成 → POST /api/ecpay/return（OrderResultURL）
+  → verifyCheckMacValue（timing-safe）
+  → QueryTradeInfo/V5 主動查詢（防竄改）
+  → TradeStatus === '1' → status = 'paid'，否則 status = 'failed'
+  → redirect /orders/:id?paymentResult=success|failed
+
+ECPay S2S POST /api/ecpay/notify（ReturnURL，localhost 不可達，部署後正常）
+  → verifyCheckMacValue
+  → RtnCode === '1' → 冪等更新 status = 'paid'
+  → 回應 1|OK（純文字，HTTP 200）
+```
+
+**CheckMacValue 規則**（`ecpayUrlEncode`）：
+`encodeURIComponent` → `%20` 轉 `+` → `~` 轉 `%7e` → `'` 轉 `%27` → lowercase → 還原 .NET 保留字元（`-`, `_`, `.`, `!`, `*`, `(`, `)`）→ SHA256 → 大寫 hex
+
+**測試卡號**：`4311-9522-2222-2222`，CVV `222`，3DS `1234`
 
 ### OpenAPI / Swagger
 

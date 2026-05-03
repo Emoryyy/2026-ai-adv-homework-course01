@@ -165,4 +165,10 @@ function seedProducts() {
 
 initializeDatabase();
 
+// Migration：為 ECPay 回呼查詢加入 merchant_trade_no 欄位（在 table 建立後執行）
+const cols = db.pragma('table_info(orders)').map(c => c.name);
+if (!cols.includes('merchant_trade_no')) {
+  db.exec('ALTER TABLE orders ADD COLUMN merchant_trade_no TEXT');
+}
+
 module.exports = db;

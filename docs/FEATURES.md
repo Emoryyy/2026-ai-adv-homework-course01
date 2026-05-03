@@ -9,11 +9,11 @@
 | 商品管理（管理員） | 完成 | CRUD，含庫存管理 |
 | 購物車（雙模式） | 完成 | 訪客 Session + 已登入 JWT |
 | 訂單建立與查詢 | 完成 | 從購物車建立、訂單歷史 |
-| 支付模擬 | 完成 | 模擬成功/失敗（ECPay 尚未整合） |
+| 支付模擬 | 完成 | 模擬成功/失敗（PATCH /api/orders/:id/pay，仍保留供測試使用） |
+| ECPay 金流 | ✅ 完成 | AIO 全方位金流整合（checkout / return / notify 三端點） |
 | 訂單管理（管理員） | 完成 | 查詢全部訂單、狀態篩選 |
 | 前台 SSR 頁面 | 完成 | 所有頁面（EJS + Vue.js） |
 | OpenAPI 文件 | 完成 | swagger-jsdoc + generate-openapi.js |
-| ECPay 金流 | 未完成 | 僅有環境變數佔位符 |
 
 ---
 
@@ -329,7 +329,68 @@
 4. `action === 'fail'` → status 改為 `failed`
 5. 回傳更新後訂單（含 items）
 
-**注意**：此為模擬 API，正式整合 ECPay 後此端點將被替換。
+**注意**：此端點保留供測試使用；前台頁面已改為透過 ECPay 金流付款。
+
+---
+
+## ECPay 金流
+
+所有路由掛載於 `/api/ecpay`。
+
+### POST /api/ecpay/checkout/:orderId — 建立付款請求
+
+**認證**：Bearer token 必填。
+
+**行為**：產生符合 ECPay AIO 規格的付款參數，回傳給前端動態建立 form 後 submit 至綠界。
+
+**業務邏輯**：
+1. 確認訂單存在且屬於目前用戶（不存在 → 404）
+2. 確認訂單狀態為 `pending` 或 `failed`（已付款 → 400）
+3. 若狀態為 `failed`，先重設為 `pending` 再繼續
+4. 產生 `MerchantTradeNo`：去除 order_no 連字號 + 時間戳後4位，截至20碼（ECPay 不允許重複，每次重試皆不同）
+5. 從 `order_items` 組合 `ItemName`（以 `#` 分隔，截至200字元）
+6. 計算 `CheckMacValue`（ecpayUrlEncode + SHA256，詳見 ARCHITECTURE.md）
+7. 將 `merchant_trade_no` 寫入 orders 表（供 return/notify 端點查詢）
+8. 回傳 `{ actionUrl: 'https://payment-stage.ecpay.com.tw/...', params: { MerchantID, MerchantTradeNo, ..., CheckMacValue } }`
+
+**錯誤情境**：
+
+| HTTP | error 欄位 | 觸發條件 |
+|------|-----------|----------|
+| 404 | NOT_FOUND | 訂單不存在或不屬於目前用戶 |
+| 400 | INVALID_STATUS | 訂單已付款（status 非 pending/failed） |
+
+---
+
+### POST /api/ecpay/return — OrderResultURL（瀏覽器端回呼）
+
+**認證**：無（ECPay 以 form POST 導回瀏覽器，不帶 JWT）。
+
+**行為**：消費者在綠界完成付款後，ECPay 透過瀏覽器 POST 至此端點；驗證完成後 redirect 回訂單詳情頁。
+
+**業務邏輯**：
+1. 以 timing-safe 方式驗證 `CheckMacValue`（失敗 → redirect `/orders?paymentResult=failed`）
+2. 以 `MerchantTradeNo` 查詢訂單（查無 → redirect `/orders?paymentResult=failed`）
+3. 主動呼叫 `QueryTradeInfo/V5` 確認 `TradeStatus`（防止 form 參數被竄改）
+   - `TradeStatus === '1'`（已付款）→ 更新 status = `paid`
+   - 其他 → 更新 status = `failed`
+4. 若 QueryTradeInfo 請求失敗（逾時或網路錯誤），fallback 使用 ECPay POST 傳回的 `RtnCode`（`'1'` = 成功）
+5. Redirect 至 `/orders/:id?paymentResult=success|failed`
+
+**注意**：localhost 環境因無公開 IP，ECPay 的 S2S ReturnURL 無法觸達，但 OrderResultURL 可正常運作（透過用戶瀏覽器）。
+
+---
+
+### POST /api/ecpay/notify — ReturnURL（S2S 非同步通知）
+
+**認證**：無（ECPay Server 直接 POST）。
+
+**行為**：ECPay 付款完成後主動通知伺服器（S2S），不依賴瀏覽器。**localhost 環境此端點無法被 ECPay 觸達**，部署至公開主機後正常運作。
+
+**業務邏輯**：
+1. 驗證 `CheckMacValue`（驗證失敗則不更新訂單，但仍回傳 `1|OK` 避免 ECPay 重試）
+2. `RtnCode === '1'` 且訂單狀態為 `pending` → 更新 status = `paid`（冪等，已 paid 不再更新）
+3. 回應純文字 `1|OK`，HTTP 200（ECPay 若未收到則最多重送 4 次）
 
 ---
 
